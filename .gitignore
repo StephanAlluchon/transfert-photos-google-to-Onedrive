@@ -1,0 +1,29 @@
+# Répertoires à exclure
+archive/
+test_PY/
+__pycache__/
+
+# Fichiers Python compilés
+*.pyc
+*.pyo
+*.pyd
+
+# Fichiers de cache
+.DS_Store
+Thumbs.db
+
+# Fichiers d'environnement
+.env
+.venv
+env/
+venv/
+
+# Fichiers VS Code workspace (optionnel)
+*.code-workspace
+
+# Fichiers de log
+*.log
+
+# Fichiers temporaires
+*.tmp
+*.temp
