@@ -5,6 +5,8 @@ from PIL import Image
 from datetime import datetime
 import shutil
 import time
+import requests
+from typing import Optional, Dict
 
 def sanitize_filename(name):
     name = name.replace(" ", "_")
@@ -17,7 +19,7 @@ def to_deg(value):
     sec = int((min_float - minute) * 60 * 100)
     return ((deg, 1), (minute, 1), (sec, 100))
 
-def process_image(image_path, json_path, output_path, rename_file=True):
+def process_image(image_path, json_path, output_path, rename_file=True, enable_geocoding=False):
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
@@ -41,11 +43,27 @@ def process_image(image_path, json_path, output_path, rename_file=True):
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_datetime.encode("utf-8")
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_datetime.encode("utf-8")
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_datetime.encode("utf-8")
+        
+        # Traitement GPS et géocodage
         if lat != 0.0 or lon != 0.0:
             exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = b'N' if lat >= 0 else b'S'
             exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = to_deg(abs(lat))
             exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = b'E' if lon >= 0 else b'W'
             exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = to_deg(abs(lon))
+            
+            # Géocodage optionnel pour ajouter les noms de lieux
+            if enable_geocoding:
+                location_info = get_location_from_coordinates(lat, lon)
+                if location_info:
+                    # Ajouter les informations de localisation dans les métadonnées GPS
+                    city = location_info.get('city', '')
+                    country = location_info.get('country', '')
+                    if city and country:
+                        location_text = f"{city}, {country}"
+                        # Utiliser le champ GPSAreaInformation pour stocker le nom du lieu
+                        exif_dict["GPS"][piexif.GPSIFD.GPSAreaInformation] = location_text.encode("utf-8")
+                        print(f"   📍 Localisation ajoutée: {location_text}")
+        
         original_name = os.path.basename(image_path)
         base_name = os.path.splitext(original_name)[0]
         ext = os.path.splitext(original_name)[1].lower()
@@ -105,6 +123,65 @@ def traiter_doublons(duplicates, ext_label):
                     print(f"  Supprimé : {os.path.join(d, fn)}")
                 except Exception as e:
                     print(f"  Erreur suppression {os.path.join(d, fn)} : {e}")
+
+# Cache global pour éviter les appels répétés au service de géocodage
+location_cache = {}
+
+def get_location_from_coordinates(lat: float, lon: float) -> Optional[Dict[str, str]]:
+    """Get location information from GPS coordinates using reverse geocoding"""
+    global location_cache
+    
+    # Vérifier le cache d'abord
+    cache_key = f"{lat:.4f},{lon:.4f}"
+    if cache_key in location_cache:
+        return location_cache[cache_key]
+    
+    try:
+        # Utiliser l'API Nominatim d'OpenStreetMap (gratuite)
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            'lat': lat,
+            'lon': lon,
+            'format': 'json',
+            'addressdetails': 1,
+            'zoom': 10,  # Niveau de détail
+            'accept-language': 'fr,en'  # Préférence française puis anglaise
+        }
+        
+        headers = {
+            'User-Agent': 'Google-Photos-Processor/1.0 (contact@example.com)'
+        }
+        
+        response = requests.get(url, params=params, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if 'address' in data:
+                address = data['address']
+                location_info = {
+                    'city': address.get('city', address.get('town', address.get('village', ''))),
+                    'state': address.get('state', address.get('region', '')),
+                    'country': address.get('country', ''),
+                    'country_code': address.get('country_code', '').upper(),
+                    'full_address': data.get('display_name', ''),
+                    'coordinates': f"{lat:.6f},{lon:.6f}"
+                }
+                
+                # Mettre en cache
+                location_cache[cache_key] = location_info
+                
+                # Petit délai pour respecter les limites de l'API
+                time.sleep(1)
+                
+                return location_info
+                
+    except requests.RequestException as e:
+        print(f"⚠️  Erreur API géocodage: {e}")
+    except Exception as e:
+        print(f"⚠️  Erreur traitement localisation: {e}")
+        
+    return None
 
 def analyze_and_process(source_dir, output_dir):
     # 1. Indexation par nom de base
@@ -195,6 +272,22 @@ def analyze_and_process(source_dir, output_dir):
     
     # --- Option de renommage ---
     rename_files = input("Souhaitez-vous renommer les fichiers avec la date en préfixe ? (o/n) : ").lower() == "o"
+    
+    # --- Option de géocodage ---
+    print("\n🌍 GÉOCODAGE DES COORDONNÉES GPS")
+    print("Cette option convertit les coordonnées GPS en noms de lieux (ville, pays)")
+    print("et les ajoute dans les métadonnées EXIF des photos.")
+    print("⚠️  ATTENTION : Cette opération est plus lente car elle nécessite des appels API")
+    print("   et respecte les limites de débit (1 seconde entre chaque appel).")
+    print("   Temps estimé : ~1 seconde par photo avec coordonnées GPS.")
+    
+    enable_geocoding = input("Activer le géocodage GPS (conversion coordonnées → noms de lieux) ? (o/n) : ").lower() == "o"
+    
+    if enable_geocoding:
+        print("✅ Géocodage GPS activé - les noms de lieux seront ajoutés aux métadonnées")
+        print("   Les informations seront stockées dans le champ GPSAreaInformation")
+    else:
+        print("ℹ️  Géocodage GPS désactivé - seules les coordonnées GPS seront préservées")
 
     # 3. Traitement
     copied_jpg = 0
@@ -235,10 +328,10 @@ def analyze_and_process(source_dir, output_dir):
             out_dir = os.path.join(output_dir, rel_dir)
             os.makedirs(out_dir, exist_ok=True)
             if ".supjson" in files:
-                process_image(files[ext_img], files[".supjson"], out_dir, rename_files)
+                process_image(files[ext_img], files[".supjson"], out_dir, rename_files, enable_geocoding)
                 treated_jpg += 1
             elif ".json" in files:
-                process_image(files[ext_img], files[".json"], out_dir, rename_files)
+                process_image(files[ext_img], files[".json"], out_dir, rename_files, enable_geocoding)
                 treated_jpg += 1
             else:
                 dest_jpg = os.path.join(out_dir, os.path.basename(files[ext_img]))
