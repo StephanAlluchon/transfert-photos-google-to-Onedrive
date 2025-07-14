@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-Metadata Analysis Script for Google Photos Processor
-====================================================
+Metadata Analysis & Modification Tool for Google Photos Processor
+================================================================
 
-This script analyzes JPEG, JPG, and MP4 files to verify the presence of creation date information.
-It serves as a verification tool for the output of traitement_photos_2.py script.
+This script analyzes JPEG, JPG, and MP4 files and provides advanced metadata modification capabilities.
+It serves as both a verification tool and the primary geocoding/location writing tool.
+
+Features:
+- Comprehensive metadata analysis (dates, GPS, location info)
+- GPS geocoding (coordinates → location names using OpenStreetMap API)
+- Location information writing to EXIF metadata
+- Detailed reporting and statistics
+- Quality control for OneDrive upload preparation
 
 Author: Stephan Alluchon
-Purpose: Quality control and metadata verification for OneDrive upload preparation
+Purpose: Advanced metadata analysis and modification for photo processing workflow
 """
 
 import os
 import json
 import time
+import shutil
 from datetime import datetime
 from collections import defaultdict
 import piexif
@@ -22,10 +30,20 @@ import sys
 import requests
 from typing import Optional, Tuple, Dict
 
-class MetadataAnalyzer:
-    def __init__(self, directory_path, enable_geocoding=False):
+class MetadataAnalyzerModifier:
+    """
+    Advanced metadata analyzer and modifier for photo processing workflow.
+    
+    This class provides comprehensive metadata analysis and modification capabilities:
+    - GPS coordinate extraction and validation
+    - Location geocoding using OpenStreetMap API
+    - EXIF metadata writing and modification
+    - Detailed reporting and statistics
+    """
+    def __init__(self, directory_path, enable_geocoding=False, write_gps_to_files=False):
         self.directory_path = directory_path
         self.enable_geocoding = enable_geocoding
+        self.write_gps_to_files = write_gps_to_files
         self.stats = {
             'total_files': 0,
             'jpeg_files': 0,
@@ -35,12 +53,43 @@ class MetadataAnalyzer:
             'files_without_metadata': 0,
             'files_with_gps': 0,
             'files_with_location': 0,
+            'files_gps_written': 0,
             'errors': 0
         }
         self.detailed_results = []
         # Cache pour éviter les appels répétés au service de géocodage
         self.location_cache = {}
+        # Variables pour le suivi de la progression GPS
+        self.gps_processed = 0
+        self.total_gps_files = 0
+        # Détecter le chemin vers ffprobe
+        self.ffprobe_path = self._find_ffprobe()
         
+    def _find_ffprobe(self):
+        """Find ffprobe executable in common locations"""
+        possible_paths = [
+            'ffprobe',  # Si dans le PATH
+            'ffprobe.exe',  # Si dans le PATH (Windows)
+            r'C:\Program Files\ffmpeg\bin\ffprobe.exe',  # Installation standard
+            r'C:\ffmpeg\bin\ffprobe.exe',  # Installation alternative
+            r'C:\Program Files (x86)\ffmpeg\bin\ffprobe.exe',  # 32-bit
+            os.path.join(os.path.expanduser('~'), 'ffmpeg', 'bin', 'ffprobe.exe'),  # User install
+        ]
+        
+        for path in possible_paths:
+            try:
+                # Tester si l'exécutable fonctionne
+                result = subprocess.run([path, '-version'], 
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=5)
+                if result.returncode == 0:
+                    return path
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        
+        return None
+
     def extract_gps_coordinates(self, exif_data) -> Optional[Tuple[float, float]]:
         """Extract GPS coordinates from EXIF data"""
         try:
@@ -107,10 +156,21 @@ class MetadataAnalyzer:
         if not self.enable_geocoding:
             return None
             
-        # Vérifier le cache d'abord
-        cache_key = f"{lat:.4f},{lon:.4f}"
+        # Afficher la progression
+        if hasattr(self, 'gps_processed') and hasattr(self, 'total_gps_files') and self.total_gps_files > 0:
+            self.gps_processed += 1
+            print(f"\r🌍 Geocoding progress: [{self.gps_processed}/{self.total_gps_files}] {lat:.3f},{lon:.3f}", end='', flush=True)
+            
+        # Vérifier le cache d'abord (3 décimales = ~110m de précision)
+        cache_key = f"{lat:.3f},{lon:.3f}"
         if cache_key in self.location_cache:
-            return self.location_cache[cache_key]
+            cached_location = self.location_cache[cache_key]
+            # Afficher la localisation depuis le cache dans la progression
+            city = cached_location.get('city', '')
+            country = cached_location.get('country', '')
+            location_text = f"{city}, {country}" if city and country else country or city or "Unknown"
+            print(f"\r🌍 Geocoding progress: [{self.gps_processed}/{self.total_gps_files}] {lat:.3f},{lon:.3f} → {location_text} (cached)", end='', flush=True)
+            return cached_location
         
         try:
             # Utiliser l'API Nominatim d'OpenStreetMap (gratuite)
@@ -147,14 +207,26 @@ class MetadataAnalyzer:
                     # Mettre en cache
                     self.location_cache[cache_key] = location_info
                     
+                    # Afficher la localisation trouvée dans la progression
+                    city = location_info.get('city', '')
+                    country = location_info.get('country', '')
+                    location_text = f"{city}, {country}" if city and country else country or city or "Unknown"
+                    print(f"\r🌍 Geocoding progress: [{self.gps_processed}/{self.total_gps_files}] {lat:.3f},{lon:.3f} → {location_text}", end='', flush=True)
+                    
                     # Petit délai pour respecter les limites de l'API
                     time.sleep(1)
+                    
+                    # Nouvelle ligne à la fin du dernier traitement
+                    if hasattr(self, 'gps_processed') and hasattr(self, 'total_gps_files') and self.gps_processed == self.total_gps_files:
+                        print()  # Nouvelle ligne après le dernier fichier
                     
                     return location_info
                     
         except requests.RequestException as e:
+            print(f"\r🌍 Geocoding progress: [{self.gps_processed}/{self.total_gps_files}] {lat:.3f},{lon:.3f} → API Error", end='', flush=True)
             print(f"⚠️  Geocoding API error: {e}")
         except Exception as e:
+            print(f"\r🌍 Geocoding progress: [{self.gps_processed}/{self.total_gps_files}] {lat:.3f},{lon:.3f} → Error", end='', flush=True)
             print(f"⚠️  Location processing error: {e}")
             
         return None
@@ -218,11 +290,28 @@ class MetadataAnalyzer:
                                 result['has_gps'] = True
                                 result['gps_coordinates'] = gps_coords
                                 
-                                # Get location information
-                                if self.enable_geocoding:
-                                    location_info = self.get_location_from_coordinates(gps_coords[0], gps_coords[1])
-                                    if location_info:
-                                        result['location_info'] = location_info
+                                # Check for existing location information
+                                existing_location = self.extract_existing_location_info(exif_data)
+                                if existing_location:
+                                    # Parse existing location to create location_info dict
+                                    location_parts = existing_location.split(', ')
+                                    if len(location_parts) >= 2:
+                                        result['location_info'] = {
+                                            'city': location_parts[0].strip(),
+                                            'country': location_parts[1].strip(),
+                                            'full_address': existing_location,
+                                            'coordinates': f"{gps_coords[0]:.6f},{gps_coords[1]:.6f}",
+                                            'source': 'existing_exif'
+                                        }
+                                    else:
+                                        result['location_info'] = {
+                                            'city': '',
+                                            'country': existing_location.strip(),
+                                            'full_address': existing_location,
+                                            'coordinates': f"{gps_coords[0]:.6f},{gps_coords[1]:.6f}",
+                                            'source': 'existing_exif'
+                                        }
+                                # Note: location_info will be filled during geocoding phase if enabled and not already present
                                     
                         except (piexif.InvalidImageDataError, ValueError, KeyError) as e:
                             # Données EXIF corrompues ou format non supporté - pas une erreur critique
@@ -262,60 +351,56 @@ class MetadataAnalyzer:
             result['has_system_date'] = True
             
             # Try to get video metadata using ffprobe
-            try:
-                cmd = [
-                    'ffprobe', '-v', 'quiet', '-print_format', 'json',
-                    '-show_format', '-show_streams', file_path
-                ]
-                
-                process = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                
-                if process.returncode == 0:
-                    metadata = json.loads(process.stdout)
+            if self.ffprobe_path:
+                try:
+                    cmd = [
+                        self.ffprobe_path, '-v', 'quiet', '-print_format', 'json',
+                        '-show_format', '-show_streams', file_path
+                    ]
                     
-                    # Check for creation_time in format
-                    if 'format' in metadata and 'tags' in metadata['format']:
-                        tags = metadata['format']['tags']
-                        creation_time = tags.get('creation_time') or tags.get('date')
+                    process = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    
+                    if process.returncode == 0:
+                        metadata = json.loads(process.stdout)
                         
-                        if creation_time:
-                            result['exif_date'] = creation_time
-                            result['has_exif_date'] = True
+                        # Check for creation_time in format
+                        if 'format' in metadata and 'tags' in metadata['format']:
+                            tags = metadata['format']['tags']
+                            creation_time = tags.get('creation_time') or tags.get('date')
+                            
+                            if creation_time:
+                                result['exif_date'] = creation_time
+                                result['has_exif_date'] = True
+                            
+                            # Check for GPS coordinates in video metadata
+                            location = tags.get('location')
+                            if location:
+                                gps_coords = self.parse_video_location(location)
+                                if gps_coords:
+                                    result['has_gps'] = True
+                                    result['gps_coordinates'] = gps_coords
+                                    # Note: location_info will be filled during geocoding phase if enabled
                         
-                        # Check for GPS coordinates in video metadata
-                        location = tags.get('location')
-                        if location:
-                            gps_coords = self.parse_video_location(location)
-                            if gps_coords:
-                                result['has_gps'] = True
-                                result['gps_coordinates'] = gps_coords
-                                
-                                # Get location information
-                                if self.enable_geocoding:
-                                    location_info = self.get_location_from_coordinates(gps_coords[0], gps_coords[1])
-                                    if location_info:
-                                        result['location_info'] = location_info
-                    
-                    # Check for creation_time in streams
-                    if not result['has_exif_date'] and 'streams' in metadata:
-                        for stream in metadata['streams']:
-                            if 'tags' in stream:
-                                creation_time = stream['tags'].get('creation_time')
-                                if creation_time:
-                                    result['exif_date'] = creation_time
-                                    result['has_exif_date'] = True
-                                    break
-                else:
-                    result['error'] = "ffprobe analysis failed"
-                    
-            except subprocess.TimeoutExpired:
-                result['error'] = "ffprobe timeout"
-            except FileNotFoundError:
-                # ffprobe not installed - this is normal, don't treat as error
+                        # Check for creation_time in streams
+                        if not result['has_exif_date'] and 'streams' in metadata:
+                            for stream in metadata['streams']:
+                                if 'tags' in stream:
+                                    creation_time = stream['tags'].get('creation_time')
+                                    if creation_time:
+                                        result['exif_date'] = creation_time
+                                        result['has_exif_date'] = True
+                                        break
+                    else:
+                        result['error'] = "ffprobe analysis failed"
+                        
+                except subprocess.TimeoutExpired:
+                    result['error'] = "ffprobe timeout"
+                except Exception as e:
+                    result['error'] = f"ffprobe error: {str(e)}"
+            else:
+                # ffprobe not found - this is normal, don't treat as error
                 # Video files will be considered valid if they have system dates
                 pass
-            except Exception as e:
-                result['error'] = f"ffprobe error: {str(e)}"
                 
         except Exception as e:
             result['error'] = f"File access error: {str(e)}"
@@ -383,8 +468,7 @@ class MetadataAnalyzer:
                             self.stats['files_with_system_date'] += 1
                         if result['has_gps']:
                             self.stats['files_with_gps'] += 1
-                        if result['location_info']:
-                            self.stats['files_with_location'] += 1
+                        # Note: files_with_location will be updated during geocoding phase
                         if not result['has_exif_date'] and not result['has_system_date']:
                             self.stats['files_without_metadata'] += 1
                         if result['error']:
@@ -393,6 +477,56 @@ class MetadataAnalyzer:
                     except Exception as e:
                         self.stats['errors'] += 1
                         print(f"❌ Error processing {file_path}: {str(e)}")
+        
+        # Update statistics for location info (including existing ones)
+        for result in self.detailed_results:
+            if result.get('location_info'):
+                self.stats['files_with_location'] += 1
+        
+        # Préparer la géolocalisation si activée
+        if self.enable_geocoding:
+            gps_files = [r for r in self.detailed_results if r['has_gps']]
+            gps_files_needing_geocoding = [r for r in gps_files if not r.get('location_info')]
+            
+            self.total_gps_files = len(gps_files_needing_geocoding)
+            self.gps_processed = 0
+            
+            if self.total_gps_files > 0:
+                action_text = "writing GPS location lookup" if self.write_gps_to_files else "geocoding"
+                existing_count = len(gps_files) - len(gps_files_needing_geocoding)
+                print(f"\n🌍 Starting {action_text} for {self.total_gps_files} files...")
+                if existing_count > 0:
+                    print(f"   ({existing_count} files already have location information)")
+                
+                # Traiter seulement les fichiers GPS qui n'ont pas d'informations de localisation
+                new_locations_found = 0
+                for result in gps_files_needing_geocoding:
+                    location_info = self.get_location_from_coordinates(
+                        result['gps_coordinates'][0], 
+                        result['gps_coordinates'][1]
+                    )
+                    if location_info:
+                        location_info['source'] = 'api_geocoding'  # Mark as newly found
+                        result['location_info'] = location_info
+                        new_locations_found += 1
+                        
+                        # Écrire dans le fichier si demandé
+                        if self.write_gps_to_files and result['file_type'] == 'image':
+                            if self.write_location_to_exif(result['file_path'], location_info):
+                                self.stats['files_gps_written'] += 1
+                
+                # Update total count after geocoding
+                total_with_location = len([r for r in self.detailed_results if r.get('location_info')])
+                completion_text = f"Found {new_locations_found} new location names (total: {total_with_location} files with location info)"
+                if self.write_gps_to_files:
+                    completion_text += f" and wrote GPS data to {self.stats['files_gps_written']} files"
+                print(f"✅ {action_text.capitalize()} complete! {completion_text}.")
+            else:
+                existing_count = len(gps_files)
+                if existing_count > 0:
+                    print(f"\n✅ All {existing_count} GPS files already have location information!")
+                else:
+                    print(f"\n🌍 No GPS files found for geocoding.")
         
         self.print_summary()
         self.print_detailed_report()
@@ -409,6 +543,8 @@ class MetadataAnalyzer:
         print(f"  📅 Files with only system dates: {self.stats['files_with_system_date'] - self.stats['files_with_exif_date']}")
         print(f"  🌍 Files with GPS coordinates: {self.stats['files_with_gps']}")
         print(f"  📍 Files with location names: {self.stats['files_with_location']}")
+        if self.write_gps_to_files:
+            print(f"  ✏️  Files with GPS data written: {self.stats['files_gps_written']}")
         print(f"  ❌ Files without any metadata: {self.stats['files_without_metadata']}")
         print(f"  ⚠️  Files with errors: {self.stats['errors']}")
         
@@ -424,6 +560,9 @@ class MetadataAnalyzer:
             print(f"  📈 Files with system dates only: {system_only_percentage:.1f}%")
             print(f"  🌍 Files with GPS coordinates: {gps_percentage:.1f}%")
             print(f"  📍 Files with location names: {location_percentage:.1f}%")
+            if self.write_gps_to_files:
+                written_percentage = (self.stats['files_gps_written'] / self.stats['total_files']) * 100
+                print(f"  ✏️  Files with GPS data written: {written_percentage:.1f}%")
         
         # Add synthesis section
         self.print_synthesis()
@@ -562,6 +701,67 @@ class MetadataAnalyzer:
             if len(files_with_gps) > 10:
                 print(f"    ... and {len(files_with_gps) - 10} more files with GPS data")
     
+    def quick_gps_scan(self):
+        """Quick scan to count files with GPS coordinates and existing location information"""
+        print("🔍 Scanning for GPS coordinates and location information...")
+        
+        gps_file_count = 0
+        location_info_count = 0
+        total_supported_files = 0
+        supported_extensions = {'.jpg', '.jpeg', '.mp4'}
+        
+        for root, dirs, files in os.walk(self.directory_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_ext = os.path.splitext(file)[1].lower()
+                
+                if file_ext in supported_extensions:
+                    total_supported_files += 1
+                    
+                    try:
+                        if file_ext in ['.jpg', '.jpeg']:
+                            # Quick EXIF check for GPS data and location info
+                            with Image.open(file_path) as img:
+                                exif_bytes = img.info.get('exif', b'')
+                                if exif_bytes:
+                                    exif_data = piexif.load(exif_bytes)
+                                    
+                                    # Check for GPS coordinates
+                                    gps_coords = self.extract_gps_coordinates(exif_data)
+                                    if gps_coords:
+                                        gps_file_count += 1
+                                    
+                                    # Check for existing location information
+                                    existing_location = self.extract_existing_location_info(exif_data)
+                                    if existing_location:
+                                        location_info_count += 1
+                                        
+                        elif file_ext == '.mp4':
+                            # Quick video metadata check for GPS
+                            if self.ffprobe_path:
+                                try:
+                                    cmd = [
+                                        self.ffprobe_path, '-v', 'quiet', '-print_format', 'json',
+                                        '-show_format', file_path
+                                    ]
+                                    process = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                                    if process.returncode == 0:
+                                        metadata = json.loads(process.stdout)
+                                        if 'format' in metadata and 'tags' in metadata['format']:
+                                            tags = metadata['format']['tags']
+                                            location = tags.get('location')
+                                            if location:
+                                                gps_coords = self.parse_video_location(location)
+                                                if gps_coords:
+                                                    gps_file_count += 1
+                                except (subprocess.TimeoutExpired, Exception):
+                                    pass
+                    except Exception:
+                        # Skip files that can't be processed
+                        pass
+        
+        return gps_file_count, location_info_count, total_supported_files
+
     def export_report(self, output_file):
         """Export detailed report to JSON file"""
         # Ensure the output directory exists
@@ -599,6 +799,107 @@ class MetadataAnalyzer:
         except Exception as e:
             print(f"❌ Error writing report file: {e}")
             print(f"💡 Tip: Check if you have write permissions in {os.path.dirname(output_file)}")
+    
+    def write_location_to_exif(self, file_path: str, location_info: Dict[str, str]) -> bool:
+        """Write location information to EXIF metadata"""
+        try:
+            if not file_path.lower().endswith(('.jpg', '.jpeg')):
+                return False  # Only support JPEG files for now
+            
+            # Read existing EXIF data
+            with Image.open(file_path) as img:
+                exif_bytes = img.info.get('exif', b'')
+                
+                if exif_bytes:
+                    exif_data = piexif.load(exif_bytes)
+                else:
+                    # Create new EXIF data structure
+                    exif_data = {'0th': {}, 'Exif': {}, 'GPS': {}, '1st': {}, 'thumbnail': None}
+                
+                # Add location information to EXIF
+                # Use GPSAreaInformation field to store location name
+                location_text = f"{location_info.get('city', '')}, {location_info.get('country', '')}"
+                if location_text.strip(', '):
+                    exif_data['GPS'][piexif.GPSIFD.GPSAreaInformation] = location_text.encode('utf-8')
+                
+                # Add coordinates if not already present
+                if 'coordinates' in location_info:
+                    coords = location_info['coordinates'].split(',')
+                    if len(coords) == 2:
+                        lat, lon = float(coords[0]), float(coords[1])
+                        
+                        # Convert to GPS format if not already present
+                        if piexif.GPSIFD.GPSLatitude not in exif_data['GPS']:
+                            lat_deg, lat_min, lat_sec = self.decimal_to_gps(abs(lat))
+                            lon_deg, lon_min, lon_sec = self.decimal_to_gps(abs(lon))
+                            
+                            exif_data['GPS'][piexif.GPSIFD.GPSLatitude] = (
+                                (lat_deg, 1), (lat_min, 1), (int(lat_sec * 10000), 10000)
+                            )
+                            exif_data['GPS'][piexif.GPSIFD.GPSLatitudeRef] = 'N' if lat >= 0 else 'S'
+                            exif_data['GPS'][piexif.GPSIFD.GPSLongitude] = (
+                                (lon_deg, 1), (lon_min, 1), (int(lon_sec * 10000), 10000)
+                            )
+                            exif_data['GPS'][piexif.GPSIFD.GPSLongitudeRef] = 'E' if lon >= 0 else 'W'
+                
+                # Write back to file
+                exif_bytes = piexif.dump(exif_data)
+                
+                # Create a backup and write the new file
+                backup_path = file_path + '.backup'
+                shutil.copy2(file_path, backup_path)
+                
+                try:
+                    img.save(file_path, exif=exif_bytes)
+                    os.remove(backup_path)  # Remove backup if successful
+                    return True
+                except Exception as e:
+                    # Restore backup if writing fails
+                    if os.path.exists(backup_path):
+                        shutil.move(backup_path, file_path)
+                    raise e
+                    
+        except Exception as e:
+            print(f"⚠️  Error writing location to {file_path}: {e}")
+            return False
+    
+    def decimal_to_gps(self, decimal_degree: float) -> tuple:
+        """Convert decimal degrees to GPS format (degrees, minutes, seconds)"""
+        degrees = int(decimal_degree)
+        minutes_float = (decimal_degree - degrees) * 60
+        minutes = int(minutes_float)
+        seconds = (minutes_float - minutes) * 60
+        return degrees, minutes, seconds
+
+    def extract_existing_location_info(self, exif_data) -> Optional[str]:
+        """Extract existing location information from EXIF GPS data"""
+        try:
+            if 'GPS' not in exif_data:
+                return None
+                
+            gps_data = exif_data['GPS']
+            
+            # Check for GPSAreaInformation field
+            if piexif.GPSIFD.GPSAreaInformation in gps_data:
+                location_bytes = gps_data[piexif.GPSIFD.GPSAreaInformation]
+                if isinstance(location_bytes, bytes):
+                    try:
+                        location_text = location_bytes.decode('utf-8')
+                        return location_text.strip() if location_text.strip() else None
+                    except UnicodeDecodeError:
+                        # Try other encodings if UTF-8 fails
+                        try:
+                            location_text = location_bytes.decode('latin-1')
+                            return location_text.strip() if location_text.strip() else None
+                        except:
+                            pass
+                elif isinstance(location_bytes, str):
+                    return location_bytes.strip() if location_bytes.strip() else None
+            
+            return None
+            
+        except Exception as e:
+            return None
 
 def main():
     """Main function"""
@@ -609,10 +910,11 @@ def main():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     test_directory = os.path.join(current_dir, "test_photos")
     
-    print("🔍 Google Photos Metadata Analyzer")
+    print("� Google Photos Metadata Analyzer & Modifier")
     print("=" * 60)
-    print("This script analyzes JPEG, JPG, and MP4 files to verify creation date metadata.")
-    print("It serves as a quality control tool for the traitement_photos_2.py output.\n")
+    print("This tool analyzes and modifies JPEG, JPG, and MP4 files metadata.")
+    print("Features: Date verification, GPS geocoding, location writing, detailed reporting.")
+    print("Use this tool for advanced metadata operations after traitement_photos_2.py processing.\n")
     
     # Get directory to analyze
     directory = input(f"Directory to analyze [{default_directory}]: ").strip()
@@ -632,29 +934,77 @@ def main():
     
     # Check if ffprobe is available
     ffprobe_available = False
-    try:
-        subprocess.run(['ffprobe', '-version'], capture_output=True, check=True)
-        print("✅ ffprobe detected - enhanced video metadata analysis enabled")
+    ffprobe_path = None
+    
+    # Create a temporary analyzer to check ffprobe availability
+    temp_analyzer = MetadataAnalyzerModifier(".", enable_geocoding=False, write_gps_to_files=False)
+    ffprobe_path = temp_analyzer.ffprobe_path
+    
+    if ffprobe_path:
+        print(f"✅ ffprobe detected at: {ffprobe_path}")
+        print("   Enhanced video metadata analysis enabled")
         ffprobe_available = True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠️  ffprobe not found - video analysis will use system dates only")
-        print("💡 Tip: Install FFmpeg from https://ffmpeg.org for better video analysis")
+    else:
+        print("⚠️  ffprobe not found in common locations:")
+        print("   - C:\\Program Files\\ffmpeg\\bin\\ffprobe.exe")
+        print("   - C:\\ffmpeg\\bin\\ffprobe.exe")
+        print("   - System PATH")
+        print("   Video analysis will use system dates only")
+        print("💡 Tip: Install FFmpeg from https://ffmpeg.org or add it to your PATH")
     
     print()
     
-    # Ask if user wants to enable GPS location lookup
-    geocoding_choice = input("Enable GPS location lookup (city/country names)? This may be slower (y/n) [n]: ").strip().lower()
-    enable_geocoding = geocoding_choice == 'y'
+    # Quick scan to count GPS files before asking user
+    print("🔍 Preliminary GPS scan...")
+    temp_analyzer_gps = MetadataAnalyzerModifier(directory, enable_geocoding=False, write_gps_to_files=False)
+    gps_file_count, location_info_count, total_files = temp_analyzer_gps.quick_gps_scan()
     
-    if enable_geocoding:
-        print("✅ GPS geocoding enabled - will convert coordinates to location names")
+    print(f"📊 Found {total_files} supported files (.jpg, .jpeg, .mp4)")
+    print(f"🌍 Found {gps_file_count} files with GPS coordinates")
+    print(f"📍 Found {location_info_count} files with existing location information")
+    
+    # Calculate files that need geocoding (have GPS but no location info)
+    files_needing_geocoding = gps_file_count - location_info_count
+    if files_needing_geocoding < 0:
+        files_needing_geocoding = 0  # Safety check
+    
+    # Ask if user wants to enable GPS location lookup
+    enable_geocoding = False
+    write_gps_to_files = False
+    if files_needing_geocoding > 0:
+        print(f"\n💡 GPS geocoding can convert coordinates to location names for {files_needing_geocoding} files.")
+        print(f"   ({location_info_count} files already have location information)")
+        print("⚠️  Note: This requires internet access and may be slower (1 second per file)")
+        
+        geocoding_choice = input(f"Enable GPS location lookup for {files_needing_geocoding} files? (y/n) [n]: ").strip().lower()
+        enable_geocoding = geocoding_choice == 'y'
+        
+        if enable_geocoding:
+            estimated_time = files_needing_geocoding * 1.2  # 1 second + overhead
+            print(f"✅ GPS geocoding enabled - estimated time: {estimated_time:.0f} seconds")
+            print("   Will convert coordinates to city/country names")
+            
+            # Ask if user wants to write GPS data to files
+            write_choice = input(f"Write GPS location lookup to file metadata? (y/n) [n]: ").strip().lower()
+            write_gps_to_files = write_choice == 'y'
+            
+            if write_gps_to_files:
+                print("✅ GPS writing enabled - will write location names to EXIF metadata")
+                print("⚠️  Note: This will modify your image files (backups will be created)")
+            else:
+                print("ℹ️  GPS writing disabled - will only display location names")
+        else:
+            print("ℹ️  GPS geocoding disabled - will show coordinates only")
+    elif gps_file_count > 0:
+        print(f"\n✅ All {gps_file_count} files with GPS coordinates already have location information!")
+        print("ℹ️  No geocoding needed")
     else:
-        print("ℹ️  GPS geocoding disabled - will show coordinates only")
+        print("ℹ️  No GPS coordinates found - geocoding not available")
     
     print()
     
     # Create analyzer and run analysis
-    analyzer = MetadataAnalyzer(directory, enable_geocoding=enable_geocoding)
+    analyzer = MetadataAnalyzerModifier(directory, enable_geocoding=enable_geocoding, write_gps_to_files=write_gps_to_files)
     analyzer.analyze_directory()
     
     # Ask if user wants to export detailed report
