@@ -1,0 +1,132 @@
+{
+    "folders": [
+        {
+            "name": "Traitement Photos",
+            "path": "."
+        }
+    ],
+    "settings": {
+        "python.defaultInterpreterPath": "python",
+        "files.exclude": {
+            "**/__pycache__": true,
+            "**/*.pyc": true,
+            "**/.git": true,
+            "**/node_modules": true,
+            "**/*.log": true,
+            ".venv": false
+        },
+        "python.linting.enabled": true,
+        "python.formatting.provider": "black",
+        "editor.formatOnSave": true,
+        "explorer.fileNesting.enabled": true,
+        "explorer.fileNesting.patterns": {
+            "*.py": "${capture}.log,${capture}_*.py",
+            "analyze_metadata.py": "metadata_analysis_report_*.json",
+            "requirements.txt": ".venv"
+        }
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-python.python",
+            "ms-python.pylint",
+            "ms-toolsai.jupyter",
+            "ms-vscode.powershell",
+            "alefragnani.project-manager",
+            "ms-vscode.hexeditor"
+        ]
+    },
+    "tasks": {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "Yahoo Finance: Install Dependencies",
+                "type": "shell",
+                "command": "python",
+                "args": ["-m", "pip", "install", "-r", "requirements.txt"],
+                "options": {
+                    "cwd": "${workspaceFolder:Yahoo Finance}"
+                },
+                "group": "build",
+                "presentation": {
+                    "echo": true,
+                    "reveal": "always",
+                    "panel": "new"
+                }
+            },
+            {
+                "label": "Photos: Install Dependencies",
+                "type": "shell",
+                "command": "python",
+                "args": ["-m", "pip", "install", "Pillow", "piexif", "requests"],
+                "options": {
+                    "cwd": "${workspaceFolder:Traitement Photos}"
+                },
+                "group": "build",
+                "presentation": {
+                    "echo": true,
+                    "reveal": "always",
+                    "panel": "new"
+                }
+            },
+            {
+                "label": "Yahoo Finance: Run USD/EUR Export",
+                "type": "shell",
+                "command": "python",
+                "args": ["Export USD_EUR.py"],
+                "options": {
+                    "cwd": "${workspaceFolder:Yahoo Finance}"
+                },
+                "group": "test",
+                "presentation": {
+                    "echo": true,
+                    "reveal": "always",
+                    "panel": "new"
+                }
+            },
+            {
+                "label": "Photos: Run Metadata Analysis", 
+                "type": "shell",
+                "command": "python",
+                "args": ["analyze_metadata.py"],
+                "options": {
+                    "cwd": "${workspaceFolder:Traitement Photos}"
+                },
+                "group": "test",
+                "presentation": {
+                    "echo": true,
+                    "reveal": "always",
+                    "panel": "new"
+                }
+            }
+        ]
+    },
+    "launch": {
+        "version": "0.2.0",
+        "configurations": [
+            {
+                "name": "Yahoo Finance: Export USD/EUR",
+                "type": "debugpy",
+                "request": "launch",
+                "program": "${workspaceFolder:Yahoo Finance}/Export USD_EUR.py",
+                "console": "integratedTerminal",
+                "justMyCode": true
+            },
+            {
+                "name": "Photos: Analyze Metadata",
+                "type": "debugpy",
+                "request": "launch",
+                "program": "${workspaceFolder:Traitement Photos}/analyze_metadata.py",
+                "console": "integratedTerminal",
+                "justMyCode": true
+            },
+            {
+                "name": "Current File",
+                "type": "debugpy",
+                "request": "launch",
+                "program": "${file}",
+                "console": "integratedTerminal",
+                "justMyCode": true
+            }
+        ]
+    }
+}
